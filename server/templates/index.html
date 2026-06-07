@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        table { border-collapse: collapse; margin: 20px 0; }
+        h2.ONLINE  { background-color: #c8e6c9; color: #2e7d32; padding: 8px; border-radius: 4px; }
+        h2.OFFLINE { background-color: #ef9a9a; color: #b71c1c; padding: 8px; border-radius: 4px; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: center; }
+        td:nth-child(2) { font-family: monospace; }
+        .OK       { background-color: #c8e6c9; }
+        .WARNING  { background-color: #fff59d; }
+        .CRITICAL { background-color: #ef9a9a; }
+        .status-banner { font-size: 1.5em; padding: 10px; margin-bottom: 10px; text-align: center; border-radius: 5px; font-weight: bold; }
+        .status-banner.OK       { background-color: #c8e6c9; color: #2e7d32; }
+        .status-banner.WARNING  { background-color: #fff59d; color: #f57f17; }
+        .status-banner.CRITICAL { background-color: #ef9a9a; color: #b71c1c; }
+        .chart-container { display: block; height: 300px; margin: auto; }
+        .chart-container canvas { display: block; max-width: none !important; }
+        .sensor-cards { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px; }
+        .sensor-card { border: 1px solid #ccc; padding: 10px; min-width: 300px; }
+        .ts-short { display: none; }
+        .th-short { display: none; }
+        @media (max-width: 600px) {
+            .col-status { display: none; }
+            .th-short { display: inline; }
+            .th-full { display: none; }
+            .sensor-cards { gap: 8px; }
+            .sensor-card { flex: 1 1 0; min-width: 0; padding: 6px; overflow-x: auto; }
+            table { margin: 8px 0; }
+            th, td { padding: 4px; font-size: 0.85em; }
+            .ts-full { display: none; }
+            .ts-short { display: inline; }
+            .chart-container { min-width: 0 !important; width: 100%; }
+        }
+        @media (orientation: landscape) and (max-width: 1024px) {
+            .sensor-cards { gap: 8px; }
+            .sensor-card { flex: 1 1 0; min-width: 0; padding: 6px; overflow-x: auto; }
+            table { margin: 8px 0; }
+            th, td { padding: 4px; font-size: 0.85em; }
+            .chart-container { min-width: 0 !important; width: 100%; }
+        }
+        .zone-critical-low  { background-color: #42a5f5; }
+        .zone-warning-low   { background-color: #bbdefb; }
+        .zone-ok            { background-color: #c8e6c9; }
+        .zone-warning-high  { background-color: #fff59d; }
+        .zone-critical-high { background-color: #ef9a9a; }
+        #time-range-offset-form { display: grid; grid-template-columns: auto 1fr; row-gap: 10px; column-gap: 10px; align-items: center; max-width: 300px; }
+        #time-range-offset-form label  { white-space: nowrap; text-align: right; }
+        #time-range-offset-form select { width: 100%; box-sizing: border-box; }
+        .current-temp-display { font-size: 2.5em; font-weight: bold; text-align: center; padding: 12px; border-radius: 6px; margin: 8px 0 4px; }
+        .last-seen { text-align: center; font-size: 0.85em; color: #555; margin-bottom: 4px; }
+        #unit-toggle { margin: 8px 0 16px; padding: 5px 12px; cursor: pointer; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1"></script>
+</head>
+<body>
+    <h1>{{ title }}</h1>
+
+    <div class="status-banner {{ summary_status }}">
+        System Status: {{ summary_status }}
+    </div>
+
+    <button id="unit-toggle">Show °F</button>
+    <a href="/settings" style="margin-left: 12px;">&#9881; Settings</a>
+
+    <form method="get" id="time-range-offset-form">
+        <div>
+            <label for="offset">Select Time Offset:</label>
+            <select name="offset" id="offset" onchange="document.getElementById('time-range-offset-form').submit();">
+                {% for value, label in offset_options %}
+                    <option value="{{ value }}" {% if value == selected_offset %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label for="range">Select Time Range:</label>
+            <select name="range" id="range" onchange="document.getElementById('time-range-offset-form').submit();">
+                {% for value, label in range_options %}
+                    <option value="{{ value }}" {% if value == selected_range %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </form>
+
+    <div class="chart-wrapper" style="overflow-x: auto;">
+        <div class="chart-container">
+            <canvas id="tempChart"></canvas>
+        </div>
+    </div>
+
+    <div class="sensor-cards">
+        {% for sensor_id, sensor_data in table_data.items() %}
+            <div class="sensor-card" data-sensor="{{ sensor_id }}">
+                <h2 class="{{ sensor_data.state_class }}">
+                    {{ sensor_data.display_name }} &mdash; {{ sensor_data.state }}
+                </h2>
+                {% if sensor_data.records %}
+                <div class="current-temp-display {{ sensor_data.records[0].temp_class }}"
+                     data-celsius="{{ sensor_data.records[0].temperature }}">
+                    {{ "%.1f" | format(sensor_data.records[0].temperature) }}°C
+                </div>
+                <div class="last-seen" data-timestamp="{{ sensor_data.records[0].timestamp }}">
+                    Last seen: <span class="last-seen-text">—</span>
+                </div>
+                {% else %}
+                <div class="current-temp-display">—</div>
+                <div class="last-seen">Last seen: <span class="last-seen-text">never</span></div>
+                {% endif %}
+                <table>
+                    <thead>
+                        <tr>
+                            <th><span class="th-full">Temperature</span><span class="th-short">Temp.</span></th>
+                            <th>Timestamp</th>
+                            <th class="col-status">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for record in sensor_data.records %}
+                            <tr class="{{ record.temp_class }}">
+                                <td data-celsius="{{ record.temperature }}">{{ record.temperature }}</td>
+                                <td><span class="ts-full">{{ record.timestamp }}</span><span class="ts-short">{{ record.timestamp[5:10] }} {{ record.timestamp[11:16] }}</span></td>
+                                <td class="col-status">{{ record.status }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% endfor %}
+    </div>
+
+    <script>
+        // ── Unit state ─────────────────────────────────────────────────────────
+        let isFahrenheit = localStorage.getItem('tempUnit') === 'F';
+        function cToF(c)      { return c * 9 / 5 + 32; }
+        function toDisplay(c) { return isFahrenheit ? cToF(c) : c; }
+        function unitLabel()  { return isFahrenheit ? '°F' : '°C'; }
+
+        // ── Zone data (kept in celsius; converted on toggle) ───────────────────
+        const celsiusZones = {{ temp_zones | tojson }};
+        let activeZones = celsiusZones.slice();
+
+        // ── Chart background plugin ────────────────────────────────────────────
+        Chart.register({
+            id: 'backgroundColorPlugin',
+            beforeDraw: (chart) => {
+                const ctx    = chart.ctx;
+                const yScale = chart.scales['y'];
+                const minY   = yScale.min;
+                const maxY   = yScale.max;
+
+                activeZones.forEach(zone => {
+                    if (zone.end < minY || zone.start > maxY) return;
+                    const clippedStart = Math.max(zone.start, minY);
+                    const clippedEnd   = Math.min(zone.end,   maxY);
+                    const yStart = yScale.getPixelForValue(clippedStart);
+                    const yEnd   = yScale.getPixelForValue(clippedEnd);
+                    const top    = Math.min(yStart, yEnd);
+                    const height = Math.abs(yEnd - yStart);
+                    ctx.fillStyle = zone.color;
+                    ctx.fillRect(chart.chartArea.left, top, chart.chartArea.right - chart.chartArea.left, height);
+                });
+            }
+        });
+
+        // ── Chart initialisation ───────────────────────────────────────────────
+        function shortTs(ts) {
+            const m = ts.match(/^\d{4}-(\d{2}-\d{2}) (\d{2}:\d{2})/);
+            return m ? `${m[1]} ${m[2]}` : ts;
+        }
+
+        const canvas = document.getElementById('tempChart');
+        const ctx    = canvas.getContext('2d');
+
+        const chartData = {
+            datasets: [
+                {% set colors = ['red', 'blue', 'green', 'orange', 'purple', 'teal'] %}
+                {% for sensor_id, records in chart_data.items() %}
+                    {% set color = colors[loop.index0 % colors|length] %}
+                    {
+                        label: "{{ table_data[sensor_id].display_name }}",
+                        data: {{ records | tojson }},
+                        borderColor: "{{ color }}",
+                        backgroundColor: "{{ color }}",
+                        tension: 0.1,
+                        fill: false
+                    }{% if not loop.last %},{% endif %}
+                {% endfor %}
+            ]
+        };
+
+        let totalPoints = 0;
+        chartData.datasets.forEach(ds => { totalPoints += ds.data.length; });
+        const container = document.querySelector('.chart-container');
+        container.style.minWidth = Math.min(Math.max(totalPoints * 5, 500), 5000) + 'px';
+
+        const tempChart = new Chart(ctx, {
+            type: 'line',
+            data: chartData,
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top' },
+                    title:  { display: true, text: 'Freezer Temperatures' }
+                },
+                scales: {
+                    y: {
+                        afterDataLimits(scale) {
+                            // Add 15% padding around the data range,
+                            // clamped to the outer zone boundaries
+                            const zoneLow  = toDisplay(celsiusZones[0].start);
+                            const zoneHigh = toDisplay(celsiusZones[celsiusZones.length - 1].end);
+                            const padding  = (scale.max - scale.min) * 0.15;
+                            scale.min = Math.max(zoneLow,  scale.min - padding);
+                            scale.max = Math.min(zoneHigh, scale.max + padding);
+                        },
+                        title: { display: true, text: '°C' }
+                    },
+                    x: {
+                        type: 'time',
+                        time: {
+                            unit: 'minute',
+                            tooltipFormat: 'HH:mm',
+                            displayFormats: { minute: 'HH:mm' }
+                        },
+                        title: { display: true, text: 'Time' }
+                    }
+                }
+            },
+            plugins: ['backgroundColorPlugin']
+        });
+
+        // Store original celsius values for unit conversion
+        const celsiusChartData = {};
+        tempChart.data.datasets.forEach(ds => {
+            celsiusChartData[ds.label] = ds.data.map(p => ({ x: p.x, y: p.y }));
+        });
+
+        // ── Unit toggle ────────────────────────────────────────────────────────
+        function applyUnit() {
+            const unit = unitLabel();
+            document.getElementById('unit-toggle').textContent = `Show ${isFahrenheit ? '°C' : '°F'}`;
+
+            // Update server-rendered current-temp displays
+            document.querySelectorAll('.current-temp-display[data-celsius]').forEach(el => {
+                el.textContent = toDisplay(parseFloat(el.dataset.celsius)).toFixed(1) + unit;
+            });
+
+            // Update server-rendered table temperature cells
+            document.querySelectorAll('td[data-celsius]').forEach(el => {
+                el.textContent = toDisplay(parseFloat(el.dataset.celsius)).toFixed(1);
+            });
+
+            // Convert chart dataset values
+            tempChart.data.datasets.forEach(ds => {
+                const orig = celsiusChartData[ds.label];
+                if (orig) ds.data = orig.map(p => ({ x: p.x, y: toDisplay(p.y) }));
+            });
+
+            // Convert zone boundaries for background plugin
+            activeZones = celsiusZones.map(z => ({
+                ...z, start: toDisplay(z.start), end: toDisplay(z.end)
+            }));
+
+            // Update y-axis label and redraw
+            tempChart.options.scales.y.title.text = unit;
+            tempChart.update();
+        }
+
+        function toggleUnit() {
+            isFahrenheit = !isFahrenheit;
+            localStorage.setItem('tempUnit', isFahrenheit ? 'F' : 'C');
+            applyUnit();
+        }
+
+        document.getElementById('unit-toggle').addEventListener('click', toggleUnit);
+
+        // Apply saved preference on load
+        if (isFahrenheit) applyUnit();
+
+        // ── Last-seen counter ──────────────────────────────────────────────────
+        function updateLastSeen() {
+            document.querySelectorAll('.last-seen[data-timestamp]').forEach(el => {
+                const ts = el.dataset.timestamp;
+                if (!ts) return;
+                const seconds = Math.floor((Date.now() - new Date(ts.replace(' ', 'T')).getTime()) / 1000);
+                let text;
+                if (seconds < 60)        text = `${seconds}s ago`;
+                else if (seconds < 3600) text = `${Math.floor(seconds / 60)}m ago`;
+                else                     text = `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m ago`;
+                el.querySelector('.last-seen-text').textContent = text;
+            });
+        }
+        setInterval(updateLastSeen, 1000);
+        updateLastSeen();
+
+        // ── Fetch polling ──────────────────────────────────────────────────────
+        function updateBanner(status) {
+            const banner = document.querySelector('.status-banner');
+            banner.className   = `status-banner ${status}`;
+            banner.textContent = `System Status: ${status}`;
+        }
+
+        function updateSensorCards(tableData) {
+            for (const [sensorId, data] of Object.entries(tableData)) {
+                const card = document.querySelector(`[data-sensor="${sensorId}"]`);
+                if (!card) continue;
+
+                const header = card.querySelector('h2');
+                if (header) {
+                    header.className   = data.state_class;
+                    header.textContent = `${data.display_name} \u2014 ${data.state}`;
+                }
+
+                if (data.records.length > 0) {
+                    const latest = data.records[0];
+
+                    const tempDisplay = card.querySelector('.current-temp-display');
+                    if (tempDisplay) {
+                        tempDisplay.className       = `current-temp-display ${latest.temp_class}`;
+                        tempDisplay.dataset.celsius = latest.temperature;
+                        tempDisplay.textContent     = toDisplay(latest.temperature).toFixed(1) + unitLabel();
+                    }
+
+                    const lastSeen = card.querySelector('.last-seen');
+                    if (lastSeen) lastSeen.dataset.timestamp = latest.timestamp;
+                }
+
+                const tbody = card.querySelector('tbody');
+                if (tbody) {
+                    tbody.innerHTML = data.records.map(r =>
+                        `<tr class="${r.temp_class}">
+                            <td data-celsius="${r.temperature}">${toDisplay(r.temperature).toFixed(1)}</td>
+                            <td><span class="ts-full">${r.timestamp}</span><span class="ts-short">${shortTs(r.timestamp)}</span></td>
+                            <td class="col-status">${r.status}</td>
+                        </tr>`
+                    ).join('');
+                }
+            }
+        }
+
+        function updateChart(newChartData) {
+            for (const dataset of tempChart.data.datasets) {
+                const newData = newChartData[dataset.label];
+                if (newData) {
+                    celsiusChartData[dataset.label] = newData.map(p => ({ x: p.x, y: p.y }));
+                    dataset.data = newData.map(p => ({ x: p.x, y: toDisplay(p.y) }));
+                }
+            }
+            tempChart.update();
+        }
+
+        function fetchData() {
+            const range  = document.getElementById('range').value;
+            const offset = document.getElementById('offset').value;
+
+            fetch(`/data?range=${range}&offset=${offset}`)
+                .then(r => r.json())
+                .then(d => {
+                    updateBanner(d.summary_status);
+                    updateSensorCards(d.table_data);
+                    updateChart(d.chart_data);
+                })
+                .catch(e => console.error('Refresh failed:', e))
+                .finally(() => scheduleRefresh());
+        }
+
+        let refreshTimer;
+        function scheduleRefresh() {
+            clearTimeout(refreshTimer);
+            refreshTimer = setTimeout(fetchData, 60000);
+        }
+        scheduleRefresh();
+    </script>
+</body>
+</html>

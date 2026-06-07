@@ -1,0 +1,14 @@
+[Unit]
+Description=Freezer Monitor Server (Gunicorn)
+After=network.target redis.service
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/freezer_monitor/server
+ExecStart=/home/pi/freezer_monitor/venv/bin/gunicorn -w 1 -b 0.0.0.0:5000 --worker-class gevent probe_server:create_app()
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

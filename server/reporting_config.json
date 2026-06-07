@@ -1,0 +1,26 @@
+{
+    "range_options": [
+        [15, "Previous 15 Minutes"],
+        [30, "Previous 30 Minutes"],
+        [60, "Previous 1 Hour"],
+        [240, "Previous 4 Hours"],
+        [480, "Previous 8 Hours"],
+        [720, "Previous 12 Hours"],
+        [1440, "Previous 1 Day"],
+        [4320, "Previous 3 Days"],
+        [7200, "Previous 5 Days"],
+        [10080, "Previous 1 Week"],
+        [40320, "Previous 4 Weeks"]
+    ],
+    "offset_options": [
+        [0, "Now"],
+        [60, "1 Hour Ago"],
+        [240, "4 Hours Ago"],
+        [480, "8 Hours Ago"],
+        [720, "12 Hours Ago"],
+        [1440, "1 Day Ago"],
+        [7200, "5 Days Ago"],
+        [10080, "1 Week Ago"],
+        [40320, "4 Weeks Ago"]
+    ]
+}

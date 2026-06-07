@@ -1,0 +1,15 @@
+[Unit]
+Description=Freezer Monitor Client Probe
+After=network.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/freezer_monitor/client
+ExecStart=/home/pi/freezer_monitor/venv/bin/python /home/pi/freezer_monitor/client/probe_client.py
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/pi/freezer_monitor/server
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

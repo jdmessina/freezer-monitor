@@ -1,0 +1,33 @@
+# Credentials — never commit
+server/secrets.env
+client/secrets.env
+
+# Database
+server/data.db
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/
+.playwright-mcp/
+
+# Deployment script (contains private IPs)
+deploy.sh
+
+# Personal notes / scratch files
+Freezer Alarm.txt
+freezer_monitor_project.txt
+README.txt
+Freezer Monitor - Code Review.md
+@chart.png
+chart2.png

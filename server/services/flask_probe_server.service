@@ -1,0 +1,14 @@
+[Unit]
+Description=Freezer Monitor Server (Flask dev)
+After=network.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/freezer_monitor/server
+ExecStart=/home/pi/freezer_monitor/venv/bin/python /home/pi/freezer_monitor/server/probe_server.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

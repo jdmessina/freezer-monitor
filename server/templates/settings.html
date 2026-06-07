@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Freezer Monitor — Settings</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { margin-bottom: 4px; }
+        .back-link { display: inline-block; margin-bottom: 20px; color: #1565c0; }
+        table { border-collapse: collapse; margin: 20px 0; }
+        th, td { border: 1px solid #ccc; padding: 10px 14px; text-align: left; vertical-align: middle; }
+        th { background-color: #f5f5f5; }
+        input[type="number"] { width: 70px; padding: 5px; font-size: 1em; }
+        .hint { font-size: 0.82em; color: #666; margin-top: 3px; }
+        .btn-save { padding: 8px 20px; background-color: #4caf50; color: white; border: none; border-radius: 4px; font-size: 1em; cursor: pointer; }
+        .btn-save:hover { background-color: #388e3c; }
+        .saved-banner { display: inline-block; margin-left: 12px; color: #2e7d32; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Sensor Settings</h1>
+    <a class="back-link" href="/">&larr; Back to Dashboard</a>
+
+    {% if saved %}
+    <div class="saved-banner">&#10003; Settings saved</div>
+    {% endif %}
+
+    <form method="post" action="/settings">
+        <table>
+            <thead>
+                <tr>
+                    <th>Sensor</th>
+                    <th>Warning Grace Period</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for sensor_id, setting in settings.items() %}
+                <tr>
+                    <td><strong>{{ setting.display_name }}</strong><div class="hint">{{ sensor_id }}</div></td>
+                    <td>
+                        <input type="number"
+                               name="grace_{{ sensor_id }}"
+                               value="{{ setting.warning_grace_period }}"
+                               min="0" max="1440" step="1">
+                        minutes
+                        <div class="hint">
+                            {% if setting.warning_grace_period == 0 %}
+                                Alerts immediately when temperature enters WARNING zone.
+                            {% else %}
+                                Suppresses WARNING alerts unless temperature stays elevated for {{ setting.warning_grace_period }} min.
+                                CRITICAL alerts always fire immediately.
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        {% if not settings %}
+        <p>No sensors have been seen yet. Settings will appear here once a sensor reports in.</p>
+        {% else %}
+        <button type="submit" class="btn-save">Save Settings</button>
+        {% endif %}
+    </form>
+</body>
+</html>
