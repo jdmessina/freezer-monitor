@@ -55,7 +55,7 @@ probe_client.py                    probe_server.py (Gunicorn)
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-username/freezer-monitor.git
+git clone https://github.com/jdmessina/freezer-monitor.git
 cd freezer-monitor
 ```
 
