@@ -59,16 +59,6 @@ sqlite3 server/data.db "SELECT * FROM temperatures ORDER BY timestamp DESC LIMIT
 
 **Config hierarchy:** `secrets.env` → `global_config.py` → `server_config.py` / `client_config.py`
 
-## Known Issues (from `Freezer Monitor - Code Review.md`)
-
-This file documents 32 issues. The highest-priority ones to be aware of:
-
-- **`filter_data()` crashes on empty dataset** — `max()` of empty sequence raises `ValueError`
-- **`get_sensor_state()` crashes if sensor never reported** — `None` comparison raises `TypeError`
-- **`reversed(records)` sent to Jinja2** — iterator consumed on first use; second use in template yields nothing
-- **`/submit` has no authentication** — any host can POST fake readings
-- **`secrets.env` contains plaintext credentials** — email password stored in repo
-
 ## Deployment Notes
 
 - Target path: `/home/pi/freezer_monitor/`
