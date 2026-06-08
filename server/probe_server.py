@@ -4,12 +4,12 @@ import json
 from logging.handlers import RotatingFileHandler
 from flask import Flask, render_template, request, jsonify, redirect
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime
-from db_setup import init_db, get_recent_temps, store_temperature, load_last_alerts, get_all_sensor_settings, save_sensor_settings
+from datetime import datetime, timedelta
+from db_setup import init_db, get_recent_temps, store_temperature, load_last_alerts, get_all_sensor_settings, save_sensor_settings, set_acknowledged
 from db_cleanup import cleanup_old_data
 from email_alerts import get_sensor_state, check_and_alert
 from utils import compute_summary_status, poll_probes, get_temp_class, filter_data
-from global_config import DEBUG, TEMP_TOP_THRESHOLD, TEMP_CRITICAL_THRESHOLD, TEMP_WARNING_THRESHOLD, TEMP_OK_THRESHOLD, TEMP_LOW_THRESHOLD, TEMP_BOTTOM_THRESHOLD, NOMINAL_STATUS, WARNING_STATUS, CRITICAL_STATUS, SUBMIT_API_KEY
+from global_config import DEBUG, TEMP_TOP_THRESHOLD, TEMP_CRITICAL_THRESHOLD, TEMP_WARNING_THRESHOLD, TEMP_OK_THRESHOLD, TEMP_LOW_THRESHOLD, TEMP_BOTTOM_THRESHOLD, NOMINAL_STATUS, WARNING_STATUS, CRITICAL_STATUS, SUBMIT_API_KEY, WARNING_GRACE_PERIOD, CRITICAL_GRACE_PERIOD, WARNING_ALERT_DIFFERENTIAL, CRITICAL_ALERT_DIFFERENTIAL
 from server_config import ZONE_CRITICAL_LOW, ZONE_WARNING_LOW, ZONE_OK, ZONE_WARNING_HIGH, ZONE_CRITICAL_HIGH, SERVER_LOG_FILE, REPORTING_CONFIG, SENSOR_DISPLAY_NAMES
 
 app = Flask(__name__)
@@ -69,6 +69,8 @@ def _build_dashboard_data(minutes, offset):
     raw_data = get_recent_temps(minutes, offset)
     summary_status = compute_summary_status(raw_data)
     data = filter_data(raw_data, minutes, offset)
+    last_alerts = load_last_alerts()
+    all_settings = get_all_sensor_settings()
 
     chart_data = {}
     table_data = {}
@@ -82,11 +84,45 @@ def _build_dashboard_data(minutes, offset):
         state = get_sensor_state(sensor)
         for record in records:
             record["temp_class"] = get_temp_class(record["temperature"])
+
+        alert_info = last_alerts.get(sensor, {})
+        sensor_status = alert_info.get('status', NOMINAL_STATUS)
+        sensor_next_d1 = alert_info.get('next_alert_temp')
+        last_alert_time = alert_info.get('time')
+        acknowledged = alert_info.get('acknowledged', 0)
+
+        settings = all_settings.get(sensor, {})
+        verbose = settings.get('verbose', 1)
+
+        if sensor_status == CRITICAL_STATUS:
+            hi_alert = sensor_next_d1
+            lo_alert = TEMP_CRITICAL_THRESHOLD
+            grace_secs = settings.get('critical_grace_period', CRITICAL_GRACE_PERIOD // 60) * 60
+        elif sensor_status == WARNING_STATUS:
+            hi_alert = sensor_next_d1
+            lo_alert = TEMP_WARNING_THRESHOLD
+            grace_secs = settings.get('warning_grace_period', WARNING_GRACE_PERIOD // 60) * 60
+        else:
+            hi_alert = TEMP_WARNING_THRESHOLD
+            lo_alert = None
+            grace_secs = 0
+
+        if sensor_status != NOMINAL_STATUS and grace_secs > 0 and last_alert_time is not None:
+            grace_expires_at = (last_alert_time + timedelta(seconds=grace_secs)).isoformat()
+        else:
+            grace_expires_at = None
+
         table_data[sensor] = {
             "state": state,
             "state_class": state,
             "display_name": _get_display_name(sensor),
-            "records": list(reversed(records))
+            "records": list(reversed(records)),
+            "hi_alert": hi_alert,
+            "lo_alert": lo_alert,
+            "grace_expires_at": grace_expires_at,
+            "verbose": verbose,
+            "sensor_status": sensor_status,
+            "acknowledged": acknowledged,
         }
 
     return summary_status, chart_data, table_data
@@ -132,9 +168,14 @@ def settings_page():
 
     settings = {}
     for sensor_id in sorted(all_alerts.keys()):
+        stored = all_settings.get(sensor_id, {})
         settings[sensor_id] = {
             'display_name': _get_display_name(sensor_id),
-            'warning_grace_period': all_settings.get(sensor_id, {}).get('warning_grace_period', 0)
+            'warning_grace_period':  stored.get('warning_grace_period',  WARNING_GRACE_PERIOD // 60),
+            'critical_grace_period': stored.get('critical_grace_period', CRITICAL_GRACE_PERIOD // 60),
+            'warning_differential':  stored.get('warning_differential',  WARNING_ALERT_DIFFERENTIAL),
+            'critical_differential': stored.get('critical_differential', CRITICAL_ALERT_DIFFERENTIAL),
+            'verbose':               stored.get('verbose', 1),
         }
 
     saved = request.args.get('saved') == '1'
@@ -142,19 +183,32 @@ def settings_page():
 
 @app.route("/settings", methods=["POST"])
 def settings_save():
-    for key, value in request.form.items():
-        if key.startswith('grace_'):
-            sensor_id = key[len('grace_'):]
-            try:
-                grace = max(0, min(1440, int(value)))
-                save_sensor_settings(sensor_id, grace)
-            except ValueError:
-                logging.warning(f"Invalid grace period value for {sensor_id}: {value}")
+    sensor_ids = set()
+    for key in request.form.keys():
+        for prefix in ('grace_', 'critical_grace_', 'warning_diff_', 'critical_diff_'):
+            if key.startswith(prefix):
+                sensor_ids.add(key[len(prefix):])
+
+    for sensor_id in sensor_ids:
+        try:
+            warning_grace  = max(0,   min(1440, int(request.form.get(f'grace_{sensor_id}',          WARNING_GRACE_PERIOD // 60))))
+            critical_grace = max(0,   min(1440, int(request.form.get(f'critical_grace_{sensor_id}', CRITICAL_GRACE_PERIOD // 60))))
+            warning_diff   = max(0.1, min(10.0, float(request.form.get(f'warning_diff_{sensor_id}',  WARNING_ALERT_DIFFERENTIAL))))
+            critical_diff  = max(0.1, min(10.0, float(request.form.get(f'critical_diff_{sensor_id}', CRITICAL_ALERT_DIFFERENTIAL))))
+            verbose        = 1 if f'verbose_{sensor_id}' in request.form else 0
+            save_sensor_settings(sensor_id, warning_grace, critical_grace, warning_diff, critical_diff, verbose)
+        except (ValueError, TypeError) as e:
+            logging.warning(f"Invalid settings value for {sensor_id}: {e}")
     return redirect("/settings?saved=1")
 
 @app.route("/favicon.ico")
 def favicon():
     return "", 204
+
+@app.route("/acknowledge/<sensor_id>", methods=["POST"])
+def acknowledge(sensor_id):
+    set_acknowledged(sensor_id, 1)
+    return jsonify({"status": "ok"})
 
 @app.route("/submit", methods=["POST"])
 def submit():

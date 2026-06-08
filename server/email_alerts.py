@@ -1,3 +1,4 @@
+import math
 import smtplib
 import logging
 import requests
@@ -8,8 +9,14 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from redis.exceptions import LockError
-from db_setup import get_recent_temps, load_last_alerts, save_last_alert, get_sensor_settings
-from global_config import DEBUG, WARNING_TIMEOUT, TEMP_WARNING_THRESHOLD, CRITICAL_TIMEOUT, TEMP_CRITICAL_THRESHOLD, NOMINAL_STATUS, WARNING_STATUS, CRITICAL_STATUS, SENSOR_ONLINE, SENSOR_OFFLINE, SENSOR_REPORTING_TIMEOUT, EMAIL, PHONE_NUMBER, EMAIL_SERVER, EMAIL_PORT, EMAIL_USERNAME, EMAIL_PASSWORD, CALLMEBOT_API
+from db_setup import get_recent_temps, load_last_alerts, save_last_alert, get_sensor_settings, set_acknowledged, mark_alert_sent
+from global_config import (DEBUG, WARNING_GRACE_PERIOD, CRITICAL_GRACE_PERIOD,
+                           WARNING_ALERT_DIFFERENTIAL, CRITICAL_ALERT_DIFFERENTIAL,
+                           TEMP_WARNING_THRESHOLD, TEMP_CRITICAL_THRESHOLD,
+                           NOMINAL_STATUS, WARNING_STATUS, CRITICAL_STATUS,
+                           SENSOR_ONLINE, SENSOR_OFFLINE, SENSOR_REPORTING_TIMEOUT,
+                           EMAIL, PHONE_NUMBER, EMAIL_SERVER, EMAIL_PORT,
+                           EMAIL_USERNAME, EMAIL_PASSWORD, CALLMEBOT_API)
 
 def send_whatsapp_alert(phone_number, apikey, message):
     url = 'https://api.callmebot.com/whatsapp.php'
@@ -75,7 +82,6 @@ def get_sensor_state(sensor_id, last_seen=None):
         logging.error(f"Sensor {sensor_id} has no last_seen timestamp!")
         return SENSOR_OFFLINE
 
-    # Determine if the sensor is online
     if (now - last_seen).total_seconds() < SENSOR_REPORTING_TIMEOUT:
         logging.info(f"Sensor {sensor_id} is ONLINE: Last seen: {last_seen}")
         alert_state = SENSOR_ONLINE
@@ -84,6 +90,11 @@ def get_sensor_state(sensor_id, last_seen=None):
         alert_state = SENSOR_OFFLINE
 
     return alert_state
+
+def compute_next_d1(temperature, state_threshold, differential):
+    """Next alert threshold above temperature, in steps of differential from state_threshold."""
+    steps = math.ceil((temperature - state_threshold) / differential)
+    return state_threshold + steps * differential
 
 def check_and_alert(sensor_id, temperature, status):
     r = redis.Redis()
@@ -110,140 +121,158 @@ def update_alert_status(sensor_id, temperature, status):
     last_time = sensor_state.get('time')
     last_status = sensor_state.get('status')
     last_state = sensor_state.get('state')
-    state_entry_time = sensor_state.get('state_entry_time')
+    next_alert_temp = sensor_state.get('next_alert_temp')
+    acknowledged = sensor_state.get('acknowledged', 0)
 
-    alert_type = NOMINAL_STATUS
-    trigger_alert = False
-    save_state_now = False  # Save state change without sending an alert
-    alert_sent = False
-    alert_delay = 0
-    new_state_entry_time = state_entry_time  # Updated when entering a new alert state
+    settings = get_sensor_settings(sensor_id)
+    warning_grace_secs = settings['warning_grace_period'] * 60
+    critical_grace_secs = settings['critical_grace_period'] * 60
+    warning_diff = settings['warning_differential']
+    critical_diff = settings['critical_differential']
 
-    # Per-sensor warning grace period (converted from minutes to seconds)
-    sensor_settings = get_sensor_settings(sensor_id)
-    warning_grace_seconds = sensor_settings.get('warning_grace_period', 0) * 60
-
-    # Determine online/offline state
+    # --- Online/offline handling ---
     last_seen = sensor_last_seen(sensor_id)
     alert_state = get_sensor_state(sensor_id, last_seen)
 
-    # --- Online/offline handling ---
-    if last_state == SENSOR_OFFLINE:
-        if alert_state == SENSOR_ONLINE:
-            subject = 'INFO: Sensor is Online'
-            body = f"INFO: Sensor {sensor_id} is back ONLINE: Last seen {last_seen}."
-            trigger_alert = True
-            logging.info(f"Sending Alert: Sensor {sensor_id} is back {alert_state}.")
-        else:
-            if last_time is None or (now - last_time).total_seconds() > SENSOR_REPORTING_TIMEOUT:
-                subject = 'WARNING: Sensor remains Offline'
-                body = f"WARNING: Sensor {sensor_id} remains OFFLINE: It has not been seen since {last_seen}, exceeding the {SENSOR_REPORTING_TIMEOUT} second timeout."
-                trigger_alert = True
-                logging.warning(f"Sending Alert: Sensor {sensor_id} remains {alert_state}.")
-            else:
-                time_remaining = SENSOR_REPORTING_TIMEOUT - (now - last_time).total_seconds()
-                next_alert = now + timedelta(seconds=time_remaining)
-                logging.warning(f"Suppressing Alert: Sensor {sensor_id} remains {alert_state} - resending in {time_remaining:.0f}s at {next_alert}.")
-    else:
-        if alert_state == SENSOR_OFFLINE:
-            subject = 'WARNING: Sensor is Offline'
-            body = f"WARNING: Sensor {sensor_id} is OFFLINE: It has not been seen since {last_seen}, exceeding the {SENSOR_REPORTING_TIMEOUT} second timeout."
-            trigger_alert = True
-            logging.warning(f"Sending Alert: Sensor {sensor_id} went {alert_state}.")
-        else:
-            time_remaining = SENSOR_REPORTING_TIMEOUT - (now - last_seen).total_seconds() if last_seen else 0
-            logging.info(f"Sensor {sensor_id} last seen at {last_seen}: {time_remaining:.0f} seconds until alert.")
+    if last_state == SENSOR_OFFLINE and alert_state == SENSOR_ONLINE:
+        body = f"INFO: Sensor {sensor_id} is back ONLINE: Last seen {last_seen}."
+        logging.info(f"Sending Alert: Sensor {sensor_id} is back ONLINE.")
+        threading.Thread(target=send_alert, args=(sensor_id, 'INFO: Sensor is Online', body), daemon=True).start()
+        save_last_alert(sensor_id, NOMINAL_STATUS, SENSOR_ONLINE, now, None, next_alert_temp)
+        last_status = NOMINAL_STATUS  # reset so subsequent temperature check fires a transition if needed
+        last_time = now
 
-    # Send online/offline alert
-    if trigger_alert:
-        logging.info(f"Sending {alert_state} alert for sensor {sensor_id}.")
-        threading.Thread(target=send_alert, args=(sensor_id, subject, body), daemon=True).start()
-        save_last_alert(sensor_id, alert_type, alert_state, now, new_state_entry_time)
-        alert_sent = True
-        trigger_alert = False
+    elif last_state == SENSOR_OFFLINE and alert_state == SENSOR_OFFLINE:
+        if last_time is None or (now - last_time).total_seconds() > SENSOR_REPORTING_TIMEOUT:
+            body = f"WARNING: Sensor {sensor_id} remains OFFLINE: It has not been seen since {last_seen}, exceeding the {SENSOR_REPORTING_TIMEOUT} second timeout."
+            logging.warning(f"Sending Alert: Sensor {sensor_id} remains OFFLINE.")
+            threading.Thread(target=send_alert, args=(sensor_id, 'WARNING: Sensor remains Offline', body), daemon=True).start()
+            save_last_alert(sensor_id, NOMINAL_STATUS, SENSOR_OFFLINE, now, None, next_alert_temp)
+        else:
+            time_remaining = SENSOR_REPORTING_TIMEOUT - (now - last_time).total_seconds()
+            logging.warning(f"Suppressing Alert: Sensor {sensor_id} remains OFFLINE - resending in {time_remaining:.0f}s.")
+        return
+
+    elif last_state != SENSOR_OFFLINE and alert_state == SENSOR_OFFLINE:
+        body = f"WARNING: Sensor {sensor_id} is OFFLINE: It has not been seen since {last_seen}, exceeding the {SENSOR_REPORTING_TIMEOUT} second timeout."
+        logging.warning(f"Sending Alert: Sensor {sensor_id} went OFFLINE.")
+        threading.Thread(target=send_alert, args=(sensor_id, 'WARNING: Sensor is Offline', body), daemon=True).start()
+        save_last_alert(sensor_id, NOMINAL_STATUS, SENSOR_OFFLINE, now, None, next_alert_temp)
+        return
+
+    else:
+        time_remaining = SENSOR_REPORTING_TIMEOUT - (now - last_seen).total_seconds() if last_seen else 0
+        logging.info(f"Sensor {sensor_id} last seen at {last_seen}: {time_remaining:.0f} seconds until offline alert.")
 
     # --- Temperature alert logic ---
     if temperature is None:
         logging.info(f"Sensor {sensor_id} has no temperature data; skipping temperature alert evaluation.")
+        return
 
-    elif temperature < TEMP_WARNING_THRESHOLD:
-        if last_status is not None and last_status != NOMINAL_STATUS:
-            if last_time is not None:
-                # An alert was previously sent — send "cleared" alert
-                alert_type = NOMINAL_STATUS
-                new_state_entry_time = None
-                subject = 'INFO: Freezer Temperature Returned to Normal'
-                body = f"Temperature Alert Cleared! Sensor {sensor_id} reports {temperature}°C and {status} status."
-                trigger_alert = True
-                logging.info(f"Sending Alert: Temperature alert cleared for Sensor {sensor_id}.")
-            else:
-                # Returned to nominal within grace period — clear state silently, no alert
-                alert_type = NOMINAL_STATUS
-                new_state_entry_time = None
-                save_state_now = True
-                logging.info(f"Sensor {sensor_id} returned to nominal within grace period — no alert sent.")
-        elif last_status is None:
-            alert_type = NOMINAL_STATUS
-            subject = 'INFO: Freezer Monitoring Service Restarted (Sensor Normal)'
-            body = f"INFO: Freezer Monitoring Service Restarted. Sensor {sensor_id} reports {temperature}°C and {status} status."
-            trigger_alert = True
-            logging.info(f"System Alert: Freezer Monitoring service restarted.")
-
-    elif temperature > TEMP_CRITICAL_THRESHOLD:
-        # Critical — always alert immediately, no grace period
-        logging.warning(f"CRITICAL ALERT on sensor {sensor_id} with temp {temperature}°C > {TEMP_CRITICAL_THRESHOLD}°C")
-        alert_type = CRITICAL_STATUS
-        alert_delay = CRITICAL_TIMEOUT
-        subject = 'CRITICAL: Freezer Temperature Alert'
-        body = f"Critical Temperature Alert! Sensor {sensor_id} reports {temperature}°C and {status} status."
-        trigger_alert = True
-        if last_status != CRITICAL_STATUS:
-            new_state_entry_time = now  # Reset entry time on escalation
-
+    if temperature > TEMP_CRITICAL_THRESHOLD:
+        new_status = CRITICAL_STATUS
     elif temperature > TEMP_WARNING_THRESHOLD:
-        logging.warning(f"WARNING on sensor {sensor_id} with temp {temperature}°C > {TEMP_WARNING_THRESHOLD}°C")
-        alert_type = WARNING_STATUS
-        alert_delay = WARNING_TIMEOUT
-
-        if last_status != WARNING_STATUS:
-            # Just entered WARNING — record entry time, suppress alert during grace period
-            new_state_entry_time = now
-            save_state_now = True
-            logging.info(f"Sensor {sensor_id} entered WARNING state. Grace period: {warning_grace_seconds:.0f}s.")
-        else:
-            # Already in WARNING — check grace period
-            if warning_grace_seconds > 0 and state_entry_time and \
-               (now - state_entry_time).total_seconds() < warning_grace_seconds:
-                remaining = warning_grace_seconds - (now - state_entry_time).total_seconds()
-                logging.info(f"Suppressing WARNING for {sensor_id}: {remaining:.0f}s remaining in {warning_grace_seconds/60:.0f}min grace period.")
-            else:
-                # Grace period expired or disabled — allow alert
-                subject = 'WARNING: Freezer Temperature Alert'
-                body = f"Warning Temperature Alert! Sensor {sensor_id} reports {temperature}°C and {status} status."
-                trigger_alert = True
-                logging.warning(f"Sending WARNING alert for Sensor {sensor_id}: {temperature}°C.")
-
+        new_status = WARNING_STATUS
     else:
-        alert_type = NOMINAL_STATUS
+        new_status = NOMINAL_STATUS
 
-    # Spam check — suppress repeat alerts within the cooldown window
-    if trigger_alert and alert_type != NOMINAL_STATUS:
-        if (last_status == alert_type and last_time and (now - last_time).total_seconds() < alert_delay) or \
-           (last_status == CRITICAL_STATUS and alert_type == WARNING_STATUS and last_time and
-            (now - last_time).total_seconds() < CRITICAL_TIMEOUT):
-            next_alert_time = last_time + timedelta(seconds=alert_delay if last_status == alert_type else CRITICAL_TIMEOUT)
-            logging.info(f"Pending Alert: Sensor {sensor_id} last alerted at {last_time}. Next {alert_type} alert at {next_alert_time}")
-            trigger_alert = False
-
-    # Send temperature alert and persist state
-    if trigger_alert:
-        logging.info(f"Sending {alert_type} alert for sensor {sensor_id}.")
+    # System restart — no prior state recorded
+    if last_status is None:
+        subject = 'INFO: Freezer Monitoring Service Restarted'
+        body = f"INFO: Freezer Monitoring Service Restarted. Sensor {sensor_id} reports {temperature}°C ({status})."
+        if new_status == NOMINAL_STATUS:
+            new_d1 = TEMP_WARNING_THRESHOLD
+            new_last_time = None
+        elif new_status == WARNING_STATUS:
+            new_d1 = compute_next_d1(temperature, TEMP_WARNING_THRESHOLD, warning_diff)
+            new_last_time = now
+        else:
+            new_d1 = compute_next_d1(temperature, TEMP_CRITICAL_THRESHOLD, critical_diff)
+            new_last_time = now
+        logging.info(f"System restart alert for {sensor_id}: status={new_status}, D1={new_d1:.1f}°C")
+        set_acknowledged(sensor_id, 0)
+        mark_alert_sent(sensor_id)
         threading.Thread(target=send_alert, args=(sensor_id, subject, body), daemon=True).start()
-        save_last_alert(sensor_id, alert_type, alert_state, now, new_state_entry_time)
-        alert_sent = True
-    elif save_state_now:
-        # Persist state change (grace period entry or silent clear) without sending an alert
-        save_last_alert(sensor_id, alert_type, alert_state, last_time, new_state_entry_time)
+        save_last_alert(sensor_id, new_status, alert_state, new_last_time, None, new_d1)
+        return
 
-    if not alert_sent and not save_state_now:
-        logging.info(f"No alerts sent for {sensor_id}.")
+    # State transition — fires immediately regardless of grace period
+    if new_status != last_status:
+        set_acknowledged(sensor_id, 0)
+        if new_status == NOMINAL_STATUS:
+            subject = 'INFO: Freezer Temperature Returned to Normal'
+            body = f"Temperature Alert Cleared! Sensor {sensor_id} reports {temperature}°C ({status})."
+            logging.info(f"Sending transition alert for {sensor_id}: {last_status} → NOMINAL")
+            mark_alert_sent(sensor_id)
+            threading.Thread(target=send_alert, args=(sensor_id, subject, body), daemon=True).start()
+            # S1=0 (last_time=None) so next threshold crossing fires immediately
+            save_last_alert(sensor_id, NOMINAL_STATUS, alert_state, None, None, TEMP_WARNING_THRESHOLD)
+
+        elif new_status == WARNING_STATUS:
+            subject = 'WARNING: Freezer Temperature Alert'
+            body = f"Warning Temperature Alert! Sensor {sensor_id} reports {temperature}°C ({status})."
+            new_d1 = compute_next_d1(temperature, TEMP_WARNING_THRESHOLD, warning_diff)
+            logging.warning(f"Sending transition alert for {sensor_id}: {last_status} → WARNING, D1={new_d1:.1f}°C")
+            mark_alert_sent(sensor_id)
+            threading.Thread(target=send_alert, args=(sensor_id, subject, body), daemon=True).start()
+            save_last_alert(sensor_id, WARNING_STATUS, alert_state, now, None, new_d1)
+
+        else:  # CRITICAL
+            subject = 'CRITICAL: Freezer Temperature Alert'
+            body = f"Critical Temperature Alert! Sensor {sensor_id} reports {temperature}°C ({status})."
+            new_d1 = compute_next_d1(temperature, TEMP_CRITICAL_THRESHOLD, critical_diff)
+            logging.warning(f"Sending transition alert for {sensor_id}: {last_status} → CRITICAL, D1={new_d1:.1f}°C")
+            mark_alert_sent(sensor_id)
+            threading.Thread(target=send_alert, args=(sensor_id, subject, body), daemon=True).start()
+            save_last_alert(sensor_id, CRITICAL_STATUS, alert_state, now, None, new_d1)
+        return
+
+    # Same state — no transition
+    if new_status == NOMINAL_STATUS:
+        logging.info(f"Sensor {sensor_id}: {temperature}°C — nominal, no alert needed.")
+        return
+
+    # User acknowledged this alert state — suppress until sensor returns to nominal
+    if acknowledged:
+        logging.info(f"Sensor {sensor_id}: {new_status} alert acknowledged; suppressing until next state transition.")
+        return
+
+    # In WARNING or CRITICAL: evaluate S1 (grace period cooldown) and D1 (differential threshold)
+    grace_secs = warning_grace_secs if new_status == WARNING_STATUS else critical_grace_secs
+    state_threshold = TEMP_WARNING_THRESHOLD if new_status == WARNING_STATUS else TEMP_CRITICAL_THRESHOLD
+    differential = warning_diff if new_status == WARNING_STATUS else critical_diff
+
+    # D1 not yet set — initialise without alerting (e.g. after DB migration or first reading)
+    if next_alert_temp is None:
+        next_alert_temp = compute_next_d1(temperature, state_threshold, differential)
+        save_last_alert(sensor_id, new_status, alert_state, last_time, None, next_alert_temp)
+        logging.info(f"Initialised D1={next_alert_temp:.1f}°C for {sensor_id} ({new_status}).")
+        return
+
+    # Above 0°C: bypass grace and D1, alert every reading
+    if temperature > 0:
+        subject = f'{new_status}: Freezer Temperature Alert — ABOVE FREEZING'
+        body = f"{'Warning' if new_status == WARNING_STATUS else 'Critical'} Temperature Alert! Sensor {sensor_id} reports {temperature:.3f}°C ({status}) — temperature is ABOVE FREEZING."
+        logging.warning(f"Sending above-freezing alert for {sensor_id}: {temperature:.3f}°C — bypassing grace/D1")
+        mark_alert_sent(sensor_id)
+        threading.Thread(target=send_alert, args=(sensor_id, subject, body), daemon=True).start()
+        save_last_alert(sensor_id, new_status, alert_state, now, None, next_alert_temp)
+        return
+
+    grace_expired = (last_time is None or (now - last_time).total_seconds() >= grace_secs)
+    temp_exceeded = temperature > next_alert_temp
+
+    if grace_expired and temp_exceeded:
+        subject = f'{new_status}: Freezer Temperature Alert'
+        body = f"{'Warning' if new_status == WARNING_STATUS else 'Critical'} Temperature Alert! Sensor {sensor_id} reports {temperature}°C ({status})."
+        new_d1 = compute_next_d1(temperature, state_threshold, differential)
+        logging.warning(f"Sending {new_status} alert for {sensor_id}: {temperature:.3f}°C > D1={next_alert_temp:.1f}°C — new D1={new_d1:.1f}°C")
+        mark_alert_sent(sensor_id)
+        threading.Thread(target=send_alert, args=(sensor_id, subject, body), daemon=True).start()
+        save_last_alert(sensor_id, new_status, alert_state, now, None, new_d1)
+    else:
+        if not grace_expired:
+            remaining = grace_secs - (now - last_time).total_seconds()
+            logging.info(f"Suppressing {new_status} for {sensor_id}: {remaining:.0f}s remaining in grace period. temp={temperature:.3f}°C, D1={next_alert_temp:.1f}°C")
+        else:
+            logging.info(f"Suppressing {new_status} for {sensor_id}: temp {temperature:.3f}°C has not exceeded D1={next_alert_temp:.1f}°C")

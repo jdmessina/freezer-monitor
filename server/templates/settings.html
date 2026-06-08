@@ -9,7 +9,7 @@
         h1 { margin-bottom: 4px; }
         .back-link { display: inline-block; margin-bottom: 20px; color: #1565c0; }
         table { border-collapse: collapse; margin: 20px 0; }
-        th, td { border: 1px solid #ccc; padding: 10px 14px; text-align: left; vertical-align: middle; }
+        th, td { border: 1px solid #ccc; padding: 10px 14px; text-align: left; vertical-align: top; }
         th { background-color: #f5f5f5; }
         input[type="number"] { width: 70px; padding: 5px; font-size: 1em; }
         .hint { font-size: 0.82em; color: #666; margin-top: 3px; }
@@ -32,26 +32,44 @@
                 <tr>
                     <th>Sensor</th>
                     <th>Warning Grace Period</th>
+                    <th>Critical Grace Period</th>
+                    <th>Warning Differential</th>
+                    <th>Critical Differential</th>
+                    <th>Verbose</th>
                 </tr>
             </thead>
             <tbody>
-                {% for sensor_id, setting in settings.items() %}
+                {% for sensor_id, s in settings.items() %}
                 <tr>
-                    <td><strong>{{ setting.display_name }}</strong><div class="hint">{{ sensor_id }}</div></td>
+                    <td><strong>{{ s.display_name }}</strong><div class="hint">{{ sensor_id }}</div></td>
+
                     <td>
-                        <input type="number"
-                               name="grace_{{ sensor_id }}"
-                               value="{{ setting.warning_grace_period }}"
-                               min="0" max="1440" step="1">
-                        minutes
-                        <div class="hint">
-                            {% if setting.warning_grace_period == 0 %}
-                                Alerts immediately when temperature enters WARNING zone.
-                            {% else %}
-                                Suppresses WARNING alerts unless temperature stays elevated for {{ setting.warning_grace_period }} min.
-                                CRITICAL alerts always fire immediately.
-                            {% endif %}
-                        </div>
+                        <input type="number" name="grace_{{ sensor_id }}"
+                               value="{{ s.warning_grace_period }}" min="0" max="1440" step="1"> minutes
+                        <div class="hint">Cooldown between WARNING alerts after a transition or per-degree alert fires.</div>
+                    </td>
+
+                    <td>
+                        <input type="number" name="critical_grace_{{ sensor_id }}"
+                               value="{{ s.critical_grace_period }}" min="0" max="1440" step="1"> minutes
+                        <div class="hint">Cooldown between CRITICAL alerts after a transition or per-degree alert fires.</div>
+                    </td>
+
+                    <td>
+                        <input type="number" name="warning_diff_{{ sensor_id }}"
+                               value="{{ s.warning_differential }}" min="0.1" max="10" step="0.1"> °C
+                        <div class="hint">Temperature rise required to trigger a repeat WARNING alert.</div>
+                    </td>
+
+                    <td>
+                        <input type="number" name="critical_diff_{{ sensor_id }}"
+                               value="{{ s.critical_differential }}" min="0.1" max="10" step="0.1"> °C
+                        <div class="hint">Temperature rise required to trigger a repeat CRITICAL alert.</div>
+                    </td>
+
+                    <td>
+                        <input type="checkbox" name="verbose_{{ sensor_id }}" value="1"{% if s.verbose %} checked{% endif %}>
+                        <div class="hint">Show next-alert thresholds and grace period countdown on the dashboard.</div>
                     </td>
                 </tr>
                 {% endfor %}

@@ -52,7 +52,16 @@
         #time-range-offset-form label  { white-space: nowrap; text-align: right; }
         #time-range-offset-form select { width: 100%; box-sizing: border-box; }
         .current-temp-display { font-size: 2.5em; font-weight: bold; text-align: center; padding: 12px; border-radius: 6px; margin: 8px 0 4px; }
-        .last-seen { text-align: center; font-size: 0.85em; color: #555; margin-bottom: 4px; }
+        .last-seen { text-align: center; font-size: 0.85em; color: #555; margin-bottom: 0; }
+        .next-alert { text-align: center; font-size: 0.82em; color: #555; margin-top: 8px; margin-bottom: 2px; }
+        .grace-countdown { text-align: center; font-size: 0.82em; color: #777; margin-bottom: 6px; }
+        .sensor-card[data-verbose="0"] .next-alert,
+        .sensor-card[data-verbose="0"] .grace-countdown { display: none; }
+        .ack-container { text-align: center; margin: 6px 0 8px; }
+        .ack-btn { padding: 5px 18px; border: none; border-radius: 4px; font-size: 0.88em; cursor: pointer; }
+        .ack-btn:not(.ack-btn-done) { background: #4caf50; color: white; }
+        .ack-btn.ack-btn-done { background: #9e9e9e; color: white; cursor: default; }
+        tr.alert-sent td { font-weight: bold; color: #b71c1c; }
         #unit-toggle { margin: 8px 0 16px; padding: 5px 12px; cursor: pointer; }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -96,7 +105,7 @@
 
     <div class="sensor-cards">
         {% for sensor_id, sensor_data in table_data.items() %}
-            <div class="sensor-card" data-sensor="{{ sensor_id }}">
+            <div class="sensor-card" data-sensor="{{ sensor_id }}" data-verbose="{{ sensor_data.verbose }}">
                 <h2 class="{{ sensor_data.state_class }}">
                     {{ sensor_data.display_name }} &mdash; {{ sensor_data.state }}
                 </h2>
@@ -112,6 +121,18 @@
                 <div class="current-temp-display">—</div>
                 <div class="last-seen">Last seen: <span class="last-seen-text">never</span></div>
                 {% endif %}
+                <div class="next-alert">
+                    Next:&nbsp;↑&nbsp;<span class="next-hi-alert"{% if sensor_data.hi_alert is not none %} data-celsius="{{ sensor_data.hi_alert }}"{% endif %}>{% if sensor_data.hi_alert is not none %}{{ "%.1f"|format(sensor_data.hi_alert) }}°C{% else %}N/A{% endif %}</span>&nbsp;|&nbsp;↓&nbsp;<span class="next-lo-alert"{% if sensor_data.lo_alert is not none %} data-celsius="{{ sensor_data.lo_alert }}"{% endif %}>{% if sensor_data.lo_alert is not none %}{{ "%.1f"|format(sensor_data.lo_alert) }}°C{% else %}N/A{% endif %}</span>
+                </div>
+                <div class="grace-countdown"{% if sensor_data.grace_expires_at %} data-expires="{{ sensor_data.grace_expires_at }}"{% endif %}>
+                    Grace:&nbsp;<span class="grace-text">—</span>
+                </div>
+                <div class="ack-container"{% if sensor_data.sensor_status not in ('WARNING', 'CRITICAL') %} style="display:none"{% endif %}>
+                    <button class="ack-btn{% if sensor_data.acknowledged %} ack-btn-done{% endif %}"
+                            {% if sensor_data.acknowledged %}disabled{% endif %}>
+                        {% if sensor_data.acknowledged %}&#10003; Acknowledged{% else %}Acknowledge Alert{% endif %}
+                    </button>
+                </div>
                 <table>
                     <thead>
                         <tr>
@@ -122,7 +143,7 @@
                     </thead>
                     <tbody>
                         {% for record in sensor_data.records %}
-                            <tr class="{{ record.temp_class }}">
+                            <tr class="{{ record.temp_class }}{% if record.alert_sent %} alert-sent{% endif %}">
                                 <td data-celsius="{{ record.temperature }}">{{ record.temperature }}</td>
                                 <td><span class="ts-full">{{ record.timestamp }}</span><span class="ts-short">{{ record.timestamp[5:10] }} {{ record.timestamp[11:16] }}</span></td>
                                 <td class="col-status">{{ record.status }}</td>
@@ -257,6 +278,11 @@
                 el.textContent = toDisplay(parseFloat(el.dataset.celsius)).toFixed(1);
             });
 
+            // Update next-alert thresholds
+            document.querySelectorAll('.next-alert span[data-celsius]').forEach(el => {
+                el.textContent = toDisplay(parseFloat(el.dataset.celsius)).toFixed(1) + unit;
+            });
+
             // Convert chart dataset values
             tempChart.data.datasets.forEach(ds => {
                 const orig = celsiusChartData[ds.label];
@@ -297,8 +323,23 @@
                 el.querySelector('.last-seen-text').textContent = text;
             });
         }
-        setInterval(updateLastSeen, 1000);
-        updateLastSeen();
+        function updateGraceCountdowns() {
+            document.querySelectorAll('.grace-countdown[data-expires]').forEach(el => {
+                const remaining = Math.ceil((new Date(el.dataset.expires) - Date.now()) / 1000);
+                const span = el.querySelector('.grace-text');
+                if (remaining <= 0) {
+                    span.textContent = 'ready';
+                } else {
+                    const m = Math.floor(remaining / 60);
+                    const s = remaining % 60;
+                    span.textContent = m > 0 ? `${m}m ${s}s` : `${s}s`;
+                }
+            });
+        }
+
+        function tick() { updateLastSeen(); updateGraceCountdowns(); }
+        setInterval(tick, 1000);
+        tick();
 
         // ── Fetch polling ──────────────────────────────────────────────────────
         function updateBanner(status) {
@@ -332,10 +373,65 @@
                     if (lastSeen) lastSeen.dataset.timestamp = latest.timestamp;
                 }
 
+                // Update verbose visibility
+                card.dataset.verbose = data.verbose ? '1' : '0';
+
+                // Update grace countdown
+                const graceEl = card.querySelector('.grace-countdown');
+                if (graceEl) {
+                    if (data.grace_expires_at) {
+                        graceEl.dataset.expires = data.grace_expires_at;
+                    } else {
+                        delete graceEl.dataset.expires;
+                        const graceSpan = graceEl.querySelector('.grace-text');
+                        if (graceSpan) graceSpan.textContent = '—';
+                    }
+                }
+
+                const hiAlertEl = card.querySelector('.next-hi-alert');
+                const loAlertEl = card.querySelector('.next-lo-alert');
+                if (hiAlertEl) {
+                    if (data.hi_alert !== null && data.hi_alert !== undefined) {
+                        hiAlertEl.dataset.celsius = data.hi_alert;
+                        hiAlertEl.textContent = toDisplay(data.hi_alert).toFixed(1) + unitLabel();
+                    } else {
+                        delete hiAlertEl.dataset.celsius;
+                        hiAlertEl.textContent = 'N/A';
+                    }
+                }
+                if (loAlertEl) {
+                    if (data.lo_alert !== null && data.lo_alert !== undefined) {
+                        loAlertEl.dataset.celsius = data.lo_alert;
+                        loAlertEl.textContent = toDisplay(data.lo_alert).toFixed(1) + unitLabel();
+                    } else {
+                        delete loAlertEl.dataset.celsius;
+                        loAlertEl.textContent = 'N/A';
+                    }
+                }
+
+                // Update acknowledge button
+                const ackContainer = card.querySelector('.ack-container');
+                if (ackContainer) {
+                    const isAlert = data.sensor_status === 'WARNING' || data.sensor_status === 'CRITICAL';
+                    ackContainer.style.display = isAlert ? '' : 'none';
+                    const ackBtn = ackContainer.querySelector('.ack-btn');
+                    if (ackBtn && isAlert) {
+                        if (data.acknowledged) {
+                            ackBtn.classList.add('ack-btn-done');
+                            ackBtn.disabled = true;
+                            ackBtn.textContent = '✓ Acknowledged';
+                        } else {
+                            ackBtn.classList.remove('ack-btn-done');
+                            ackBtn.disabled = false;
+                            ackBtn.textContent = 'Acknowledge Alert';
+                        }
+                    }
+                }
+
                 const tbody = card.querySelector('tbody');
                 if (tbody) {
                     tbody.innerHTML = data.records.map(r =>
-                        `<tr class="${r.temp_class}">
+                        `<tr class="${r.temp_class}${r.alert_sent ? ' alert-sent' : ''}">
                             <td data-celsius="${r.temperature}">${toDisplay(r.temperature).toFixed(1)}</td>
                             <td><span class="ts-full">${r.timestamp}</span><span class="ts-short">${shortTs(r.timestamp)}</span></td>
                             <td class="col-status">${r.status}</td>
@@ -344,6 +440,22 @@
                 }
             }
         }
+
+        // ── Acknowledge button ─────────────────────────────────────────────────
+        document.addEventListener('click', function(e) {
+            const btn = e.target.closest('.ack-btn');
+            if (!btn || btn.disabled) return;
+            const card = btn.closest('[data-sensor]');
+            if (!card) return;
+            fetch(`/acknowledge/${encodeURIComponent(card.dataset.sensor)}`, { method: 'POST' })
+                .then(r => r.json())
+                .then(() => {
+                    btn.classList.add('ack-btn-done');
+                    btn.disabled = true;
+                    btn.textContent = '✓ Acknowledged';
+                })
+                .catch(err => console.error('Acknowledge failed:', err));
+        });
 
         function updateChart(newChartData) {
             for (const dataset of tempChart.data.datasets) {
