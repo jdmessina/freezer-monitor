@@ -6,13 +6,23 @@ A distributed temperature monitoring system for Raspberry Pi. DS18B20 temperatur
 
 - Real-time temperature chart with color-coded zones (critical, warning, OK)
 - Per-sensor status cards showing current temperature, online/offline state, and recent readings
-- Email and WhatsApp (via CallMeBot) alerts with configurable grace periods
 - Mobile-responsive dashboard with portrait and landscape support
 - Time range selector — view the last hour, 6 hours, 24 hours, or a custom offset window
 - Celsius / Fahrenheit toggle
 - Multi-sensor support — add as many client Pis as you need
 - Systemd services for automatic startup and restart on both server and client Pis
 - Interactive install/reconfigure/uninstall script (`setup.sh`)
+
+**Alert system:**
+- Email and WhatsApp (via CallMeBot) alerts on state transitions (OK → WARNING → CRITICAL and back)
+- Grace period + differential (S1/D1) system suppresses repeat alerts: a follow-up alert only fires after both a configurable cooldown (S1) *and* a configurable temperature rise (D1) have been exceeded
+- Temperatures above 0 °C bypass grace and differential entirely — an alert fires on every reading
+- Acknowledge button on the dashboard silences same-state repeat alerts until the sensor returns to normal; state transitions always fire regardless
+- Table rows where an alert was sent are highlighted in bold red for quick review
+
+**Per-sensor dashboard info (optional, toggled via Settings):**
+- Next alert thresholds — shows the hi/lo temperatures that will trigger the next alert
+- Grace period countdown — shows time remaining until the next alert can fire
 
 ## Hardware
 
@@ -46,7 +56,7 @@ probe_client.py                    probe_server.py (Gunicorn)
 | `client/probe_client.py` | Sensor daemon — reads `/sys/bus/w1/devices/<id>/w1_slave`, determines status, POSTs to server |
 | `client/client_config.py` | Client-specific settings: server URL, sensor ID, log path |
 | `server/templates/index.html` | Jinja2 template with Chart.js 4.x + Luxon for time-series visualization |
-| `server/templates/settings.html` | Per-sensor alert grace period settings UI |
+| `server/templates/settings.html` | Per-sensor settings UI: grace periods, differentials, verbose toggle |
 
 **Config hierarchy:** `secrets.env` → `global_config.py` → `server_config.py` / `client_config.py`
 
@@ -138,9 +148,19 @@ SENSOR_DISPLAY_NAMES = {
 
 The install script can add/update these interactively.
 
-### Alert grace periods
+### Alert settings
 
-Visit `http://<server-ip>:5000/settings` to configure per-sensor warning grace periods (how long a sensor must stay in WARNING before an alert fires).
+Visit `http://<server-ip>:5000/settings` to configure per-sensor alert behavior:
+
+| Setting | Default | Description |
+|---|---|---|
+| Warning grace period | 15 min | Minimum cooldown between repeat WARNING alerts |
+| Critical grace period | 5 min | Minimum cooldown between repeat CRITICAL alerts |
+| Warning differential | 1.0 °C | Temperature rise required to trigger a repeat WARNING alert |
+| Critical differential | 0.5 °C | Temperature rise required to trigger a repeat CRITICAL alert |
+| Verbose | on | Show next-alert thresholds and grace countdown on the dashboard |
+
+Both the grace period **and** the differential must be satisfied before a repeat same-state alert fires. State transitions always fire immediately. Temperatures above 0 °C bypass both settings entirely.
 
 ### secrets.env
 
